@@ -1,94 +1,74 @@
 # ==============================
 # scheduler.py
-# Background Scheduling (Daily Digest + Micro Summaries)
+# APScheduler for Daily Digest + Micro Summaries
 # ==============================
 
 import os
 import asyncio
 import logging
-
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from database import get_recent_messages
+from config import OWNER_ID, DAILY_DIGEST_HOUR, DAILY_DIGEST_MINUTE, MICRO_SUMMARY_INTERVAL_MINUTES
+from database import get_messages_since, get_recent_messages
 from summarizer import build_daily_structure, build_micro_summary
 
 logger = logging.getLogger(__name__)
 
-OWNER_ID = int(os.getenv("OWNER_ID", "0"))
-
 scheduler = AsyncIOScheduler()
 
 
-# ==========================================
-# Daily Digest Job (6 AM)
-# ==========================================
-
 async def daily_digest_job(client):
-
+    """Send a daily summary of the last 24 hours to the owner."""
     try:
         logger.info("Running daily digest job...")
-
-        messages = get_recent_messages(limit=1000)
+        from datetime import datetime, timedelta
+        cutoff = datetime.now() - timedelta(hours=24)
+        messages = get_messages_since(cutoff)
 
         if not messages:
+            logger.info("No messages in the last 24h, skipping digest.")
             return
 
         summary = await build_daily_structure(messages)
-
-        await client.send_message(
-            OWNER_ID,
-            f"📊 Daily Digest (24h)\n\n{summary}"
-        )
-
-        logger.info("Daily digest sent")
-
+        await client.send_message(OWNER_ID, f"📊 **Daily Digest (last 24h)**\n\n{summary}")
+        logger.info("Daily digest sent.")
     except Exception as e:
         logger.exception(f"Daily digest failed: {e}")
 
 
-# ==========================================
-# Micro Summary Job
-# ==========================================
-
 async def micro_summary_job(client):
-
+    """Generate a micro summary from last ~50 messages and store it."""
     try:
         logger.info("Running micro-summary job...")
-
         messages = get_recent_messages(limit=50)
-
         if not messages:
             return
 
         await build_micro_summary(messages)
-
-        logger.info("Micro-summary created")
-
+        logger.info("Micro-summary created and saved.")
     except Exception as e:
         logger.exception(f"Micro summary failed: {e}")
 
 
-# ==========================================
-# Start Scheduler
-# ==========================================
-
 def start_scheduler(client):
-
-    # 6 AM daily digest
+    """Add jobs and start the scheduler."""
+    # Daily digest at configured time
     scheduler.add_job(
         lambda: asyncio.create_task(daily_digest_job(client)),
         "cron",
-        hour=6,
-        minute=0
+        hour=DAILY_DIGEST_HOUR,
+        minute=DAILY_DIGEST_MINUTE,
+        id="daily_digest"
     )
 
-    # every 30 minutes micro summary
+    # Micro summary every N minutes
     scheduler.add_job(
         lambda: asyncio.create_task(micro_summary_job(client)),
         "interval",
-        minutes=30
+        minutes=MICRO_SUMMARY_INTERVAL_MINUTES,
+        id="micro_summary"
     )
 
     scheduler.start()
-
-    logger.info("Scheduler started successfully")
+    logger.info(f"Scheduler started. Daily digest at {DAILY_DIGEST_HOUR}:{DAILY_DIGEST_MINUTE}, "
+                f"micro summary every {MICRO_SUMMARY_INTERVAL_MINUTES} min.")
