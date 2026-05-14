@@ -1,6 +1,6 @@
 # ==============================
 # summarizer.py
-# Message Cleaning + Incremental Summaries
+# Message Cleaning + Structured Summaries
 # ==============================
 
 import logging
@@ -10,99 +10,73 @@ from database import save_summary, get_recent_summaries
 logger = logging.getLogger(__name__)
 
 
-# ==========================================
-# Message Cleaning
-# ==========================================
-
 def clean_messages(messages: list) -> list:
+    """Remove empty, too-short, and media-only messages."""
     cleaned = []
-
     for m in messages:
-
         text = (m.get("message_text") or "").strip()
-
-        if not text:
+        if not text or len(text) < 2:
             continue
-
-        if len(text) < 2:
+        if text.lower() in ("sticker", "gif", "image", "video", "file"):
             continue
-
-        if text.lower() in ["sticker", "gif", "image"]:
-            continue
-
         cleaned.append(m)
-
     return cleaned
 
 
-# ==========================================
-# Micro Summary Builder
-# ==========================================
-
 async def build_micro_summary(messages: list) -> str:
-
+    """
+    Compress a small batch of messages (e.g., last 30) into a micro summary.
+    Saves it to the database for future reference.
+    """
     messages = clean_messages(messages)
+    if not messages:
+        return ""
 
-    text_block = "\n".join(
-        f"{m['sender_name']}: {m['message_text']}"
-        for m in messages[-30:]
-    )
+    # Use last 30 or fewer
+    recent = messages[-30:]
+    text_block = "\n".join(f"{m['sender_name']}: {m['message_text']}" for m in recent)
 
     prompt = f"""
-You are a compression engine for Telegram chats.
-
-Task:
-- Summarize messages into compact memory
-- Remove repetition and noise
-- Keep only important points
-
-Output: very short bullet points.
+You are a chat compression engine. Summarize the following messages into very short bullet points (max 5 points).
+Remove repetition and noise. Keep only important information.
 
 Messages:
 {text_block}
 """
-
     summary = await call_ai(prompt)
-
-    save_summary(summary)
-
+    if summary and "unavailable" not in summary.lower():
+        save_summary(summary)
     return summary
 
 
-# ==========================================
-# Daily Summary Builder
-# ==========================================
-
 async def build_daily_structure(messages: list) -> str:
-
+    """
+    Generate a structured daily report for the last 24h.
+    """
     messages = clean_messages(messages)
+    if not messages:
+        return "No meaningful messages in the last 24 hours."
 
-    text_block = "\n".join(
-        f"{m['sender_name']}: {m['message_text']}"
-        for m in messages
-    )
+    text_block = "\n".join(f"{m['sender_name']}: {m['message_text']}" for m in messages)
 
     prompt = f"""
-Create a structured Telegram daily report:
+Create a structured daily report from this Telegram chat.
 
-Include:
-- Main topics
-- Important updates
-- Questions
-- Decisions
-- Useful links
+Include sections:
+- Main Topics
+- Important Updates / Announcements
+- Questions Asked
+- Decisions Made
+- Useful Links (if any)
 
 Messages:
 {text_block}
-"""
 
+Output in clear markdown with headings and bullet points.
+"""
     return await call_ai(prompt)
 
 
-# ==========================================
-# Load Previous Memory
-# ==========================================
-
-def load_previous_summaries():
-
-    return get_recent_summaries(limit=20)
+def load_previous_summaries(limit=20):
+    """Load past summaries for context (if needed)."""
+    return get_recent_summaries(limit=limit)
