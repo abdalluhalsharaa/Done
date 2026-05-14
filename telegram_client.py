@@ -1,18 +1,18 @@
 # ==========================================
 # telegram_client.py
-# Telegram Events + Commands + Monitoring
+# Telegram Events + Dynamic Summary Commands
 # ==========================================
 
 import os
 import logging
+from datetime import datetime, timedelta
+
 from telethon import events
 from telethon.tl.types import PeerChannel
-from dotenv import load_dotenv
 
 from database import (
     save_message,
-    get_recent_messages,
-    get_mentions
+    get_recent_messages
 )
 
 from summarizer import (
@@ -20,219 +20,153 @@ from summarizer import (
     generate_catchup_summary
 )
 
-from ai_engine import (
-    generate_context_explanation
-)
+from ai_engine import generate_context_explanation
 
-load_dotenv()
-
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ==========================================
-# Configuration
-# ==========================================
-
 TARGET_GROUP_ID = int(os.getenv("TARGET_GROUP_ID"))
-
 OWNER_ID = int(os.getenv("OWNER_ID"))
 
-MENTION_KEYWORDS = [
-    "عبدالله",
-    "عبدالله الشرع",
-    "Abdullah"
-]
+MENTION_KEYWORDS = ["عبدالله", "عبدالله الشرع", "Abdullah"]
+
 
 # ==========================================
-# Register Handlers
+# Helper: Parse summary input
+# ==========================================
+
+def parse_summary_argument(arg: str):
+    """
+    Supports:
+    - 4h  -> last 4 hours
+    - 200 -> last 200 messages
+    - None -> default
+    """
+
+    if not arg:
+        return {"type": "count", "value": 150}
+
+    arg = arg.strip().lower()
+
+    # Hours mode
+    if arg.endswith("h"):
+        try:
+            hours = int(arg.replace("h", ""))
+            return {"type": "hours", "value": hours}
+        except:
+            return {"type": "count", "value": 150}
+
+    # Messages mode
+    try:
+        count = int(arg)
+        return {"type": "count", "value": count}
+    except:
+        return {"type": "count", "value": 150}
+
+
+# ==========================================
+# Handler registration
 # ==========================================
 
 def register_handlers(client):
 
-    # ======================================
-    # Group Message Listener
-    # ======================================
-
     @client.on(events.NewMessage())
-    async def group_message_handler(event):
+    async def handler(event):
 
         try:
-
-            # Ignore private chats
             if event.is_private:
-                return
-
-            # Ignore other groups
-            if not isinstance(event.message.peer_id, PeerChannel):
                 return
 
             if event.chat_id != TARGET_GROUP_ID:
                 return
 
-            message_text = event.raw_text
-
-            if not message_text:
+            text = event.raw_text or ""
+            if not text:
                 return
 
             sender = await event.get_sender()
+            sender_name = (sender.first_name or "") + " " + (sender.last_name or "")
 
-            sender_name = (
-                f"{sender.first_name or ''} "
-                f"{sender.last_name or ''}"
-            ).strip()
-
-            sender_username = sender.username or "N/A"
-
-            # ==================================
-            # Save Message
-            # ==================================
-
+            # Save message
             save_message(
-                sender_name=sender_name,
-                sender_username=sender_username,
-                message_text=message_text,
+                sender_name=sender_name.strip(),
+                sender_username=sender.username or "",
+                message_text=text,
                 timestamp=str(event.message.date)
             )
 
-            logger.info(
-                f"Saved message from {sender_name}"
-            )
+            # Mention detection
+            lowered = text.lower()
+            for k in MENTION_KEYWORDS:
+                if k.lower() in lowered:
 
-            # ==================================
-            # Mention Detection
-            # ==================================
-
-            lowered = message_text.lower()
-
-            for keyword in MENTION_KEYWORDS:
-
-                if keyword.lower() in lowered:
-
-                    logger.info(
-                        f"Mention detected : {keyword}"
-                    )
-
-                    context = await generate_context_explanation(
-                        message_text
-                    )
-
-                    alert_message = (
-                        "🚨 Mention Detected\n\n"
-                        f"👤 Sender : {sender_name}\n"
-                        f"📝 Message :\n{message_text}\n\n"
-                        f"🧠 Context :\n{context}"
-                    )
+                    context = await generate_context_explanation(text)
 
                     await client.send_message(
                         OWNER_ID,
-                        alert_message
+                        f"🚨 Mention\n\n{sender_name}\n{text}\n\nContext:\n{context}"
                     )
-
                     break
 
-        except Exception as e:
-            logger.exception(
-                f"Group Handler Error : {e}"
-            )
 
-    # ======================================
-    # Private Commands
-    # ======================================
-
-    @client.on(events.NewMessage(
-        from_users=OWNER_ID
-    ))
-    async def private_commands(event):
-
-        try:
-
-            if not event.is_private:
-                return
-
-            text = event.raw_text.strip()
-
-            # ==================================
-            # /summary
-            # ==================================
+            # ==========================================
+            # COMMAND: /summary dynamic
+            # ==========================================
 
             if text.startswith("/summary"):
 
-                messages = get_recent_messages(
-                    limit=150
-                )
+                parts = text.split(" ", 1)
+                arg = parts[1] if len(parts) > 1 else None
 
-                summary = await generate_summary(
-                    messages
-                )
+                parsed = parse_summary_argument(arg)
 
-                await event.reply(
-                    f"🧠 Summary :\n\n{summary}"
-                )
+                if parsed["type"] == "hours":
 
-            # ==================================
-            # /catchup
-            # ==================================
+                    hours = parsed["value"]
+                    cutoff = datetime.now() - timedelta(hours=hours)
+
+                    messages = get_recent_messages(limit=2000)
+
+                    filtered = [
+                        m for m in messages
+                        if datetime.fromisoformat(m["timestamp"]) >= cutoff
+                    ]
+
+                    summary = await generate_summary(filtered)
+
+                else:
+
+                    limit = parsed["value"]
+                    messages = get_recent_messages(limit=limit)
+
+                    summary = await generate_summary(messages)
+
+                await event.reply(f"🧠 Summary\n\n{summary}")
+
+
+            # ==========================================
+            # COMMAND: /catchup
+            # ==========================================
 
             elif text.startswith("/catchup"):
 
-                messages = get_recent_messages(
-                    limit=300
-                )
+                messages = get_recent_messages(limit=300)
+                summary = await generate_catchup_summary(messages)
 
-                catchup = await generate_catchup_summary(
-                    messages
-                )
+                await event.reply(f"📌 Catch-up\n\n{summary}")
 
-                await event.reply(
-                    f"📌 Catch-up Report :\n\n{catchup}"
-                )
 
-            # ==================================
-            # /mentions
-            # ==================================
-
-            elif text.startswith("/mentions"):
-
-                mentions = get_mentions()
-
-                if not mentions:
-
-                    await event.reply(
-                        "No mentions found recently."
-                    )
-
-                    return
-
-                formatted = ""
-
-                for item in mentions[-10:]:
-
-                    formatted += (
-                        f"👤 {item['sender_name']}\n"
-                        f"📝 {item['message_text']}\n"
-                        f"⏰ {item['timestamp']}\n\n"
-                    )
-
-                await event.reply(
-                    f"🚨 Recent Mentions :\n\n{formatted}"
-                )
-
-            # ==================================
-            # /help
-            # ==================================
+            # ==========================================
+            # HELP
+            # ==========================================
 
             elif text.startswith("/help"):
 
-                help_text = (
-                    "📚 Available Commands\n\n"
-                    "/summary\n"
-                    "/catchup\n"
-                    "/mentions\n"
-                    "/help"
+                await event.reply(
+                    "/summary 4h\n"
+                    "/summary 200\n"
+                    "/catchup"
                 )
 
-                await event.reply(help_text)
-
         except Exception as e:
-            logger.exception(
-                f"Private Command Error : {e}"
-            )
+            logger.exception(f"Error: {e}")
